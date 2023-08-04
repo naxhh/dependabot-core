@@ -1,0 +1,4 @@
+dependencies {
+  testImplementation "org.junit.jupiter:junit-jupiter:${project['junit.version']}"
+  testImplementation "org.assertj:assertj-core:${project['assertj.version']}"
+}

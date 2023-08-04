@@ -18,6 +18,9 @@ module Dependabot
       SUPPORTED_VERSION_CATALOG_FILE_PATH =
         %w(/gradle/libs.versions.toml).freeze
 
+      SUPPORTED_PROPERTIES_FILE_NAMES =
+        %w(gradle.properties).freeze
+
       def self.required_files_in?(filenames)
         filenames.any? do |filename|
           SUPPORTED_BUILD_FILE_NAMES.include?(filename)
@@ -38,6 +41,7 @@ module Dependabot
 
       def all_buildfiles_in_build(root_dir)
         files = [buildfile(root_dir), settings_file(root_dir), version_catalog_file(root_dir)].compact
+        files += [properties_file(root_dir)]
         files += subproject_buildfiles(root_dir)
         files += dependency_script_plugins(root_dir)
         files + included_builds(root_dir).
@@ -146,6 +150,10 @@ module Dependabot
 
       def settings_file(dir)
         find_first(dir, SUPPORTED_SETTINGS_FILE_NAMES)
+      end
+
+      def properties_file(dir)
+        find_first(dir, SUPPORTED_PROPERTIES_FILE_NAMES)
       end
 
       def find_first(dir, supported_names)
