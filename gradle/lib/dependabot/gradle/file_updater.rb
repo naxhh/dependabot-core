@@ -9,11 +9,12 @@ module Dependabot
     class FileUpdater < Dependabot::FileUpdaters::Base
       require_relative "file_updater/dependency_set_updater"
       require_relative "file_updater/property_value_updater"
+      require_relative "file_updater/gradle_property_value_updater"
 
       SUPPORTED_BUILD_FILE_NAMES = %w(build.gradle build.gradle.kts).freeze
 
       def self.updated_files_regex
-        [/^build\.gradle(\.kts)?$/, %r{/build\.gradle(\.kts)?$}, %r{/gradle/libs\.versions\.toml$}]
+        [/^build\.gradle(\.kts)?$/, %r{/build\.gradle(\.kts)?$}, %r{/gradle/libs\.versions\.toml$}, %r{^gradle.properties$}]
       end
 
       def updated_dependency_files
@@ -64,7 +65,9 @@ module Dependabot
 
           buildfile = files.find { |f| f.name == new_req.fetch(:file) }
 
-          if new_req.dig(:metadata, :property_name)
+          if new_req.dig(:metadata, :resolved_from_property)
+            files = update_files_for_gradle_property_change(files, old_req, new_req)
+          elsif new_req.dig(:metadata, :property_name)
             files = update_files_for_property_change(files, old_req, new_req)
           elsif new_req.dig(:metadata, :dependency_set)
             files = update_files_for_dep_set_change(files, old_req, new_req)
@@ -80,6 +83,20 @@ module Dependabot
         end
 
         files
+      end
+
+      def update_files_for_gradle_property_change(buildfiles, old_req, new_req)
+        files = buildfiles.dup
+        property_name = new_req.fetch(:metadata).fetch(:resolved_from_property)
+        buildfile = files.find { |f| f.name == new_req.fetch(:file) }
+
+        GradlePropertyValueUpdater.new(dependency_files: files).
+          update_files_for_property_change(
+            property_name: property_name,
+            callsite_buildfile: buildfile,
+            previous_value: old_req.fetch(:requirement),
+            updated_value: new_req.fetch(:requirement)
+          )
       end
 
       def update_files_for_property_change(buildfiles, old_req, new_req)

@@ -21,6 +21,7 @@ module Dependabot
       require_relative "file_parser/property_value_finder"
 
       SUPPORTED_BUILD_FILE_NAMES = %w(build.gradle build.gradle.kts settings.gradle settings.gradle.kts).freeze
+      PROPERTIES_FILE = "gradle.properties"
 
       PROPERTY_REGEX =
         /
@@ -30,7 +31,7 @@ module Dependabot
         /x
 
       PART = %r{[^\s,@'":/\\]+}
-      VSN_PART = %r{[^\s,'":/\\]+}
+      VSN_PART = %r{[^\s,:/\\]+}
       DEPENDENCY_DECLARATION_REGEX = /(?:\(|\s)\s*['"](?<declaration>#{PART}:#{PART}:#{VSN_PART})['"]/
 
       DEPENDENCY_SET_DECLARATION_REGEX = /(?:^|\s)dependencySet\((?<arguments>[^\)]+)\)\s*\{/
@@ -38,13 +39,19 @@ module Dependabot
       PLUGIN_BLOCK_DECLARATION_REGEX = /(?:^|\s)plugins\s*\{/
       PLUGIN_ID_REGEX = /['"](?<id>#{PART})['"]/
 
+      PROPERTY_LINE = /^(?<key>[^=]+)=(?<value>.*)$/
+
       def parse
+        # TODO: read the gradle.properties file and build a version resolution map!
+        version_resolver = build_version_resolver(propertyfile)
+
+
         dependency_set = DependencySet.new
         buildfiles.each do |buildfile|
-          dependency_set += buildfile_dependencies(buildfile)
+          dependency_set += buildfile_dependencies(buildfile, version_resolver)
         end
         script_plugin_files.each do |plugin_file|
-          dependency_set += buildfile_dependencies(plugin_file)
+          dependency_set += buildfile_dependencies(plugin_file, version_resolver)
         end
         version_catalog_file.each do |toml_file|
           dependency_set += version_catalog_dependencies(toml_file)
@@ -132,10 +139,10 @@ module Dependabot
         /(?:^|\s|,|\()#{Regexp.quote(key)}(\s*=|:)\s*['"](?<value>[^'"]+)['"]/
       end
 
-      def buildfile_dependencies(buildfile)
+      def buildfile_dependencies(buildfile, version_resolver)
         dependency_set = DependencySet.new
 
-        dependency_set += shortform_buildfile_dependencies(buildfile)
+        dependency_set += shortform_buildfile_dependencies(buildfile, version_resolver)
         dependency_set += keyword_arg_buildfile_dependencies(buildfile)
         dependency_set += dependency_set_dependencies(buildfile)
         dependency_set += plugin_dependencies(buildfile)
@@ -143,7 +150,7 @@ module Dependabot
         dependency_set
       end
 
-      def shortform_buildfile_dependencies(buildfile)
+      def shortform_buildfile_dependencies(buildfile, version_resolver)
         dependency_set = DependencySet.new
 
         prepared_content(buildfile).scan(DEPENDENCY_DECLARATION_REGEX) do
@@ -151,9 +158,12 @@ module Dependabot
 
           group, name, version = declaration.split(":")
           version, _packaging_type = version.split("@")
+
+          version, resolvedKey = maybeResolveVersion(version, version_resolver)
+
           details = { group: group, name: name, version: version }
 
-          dep = dependency_from(details_hash: details, buildfile: buildfile)
+          dep = dependency_from(details_hash: details, buildfile: buildfile, resolved_from_property: resolvedKey)
           dependency_set << dep if dep
         end
 
@@ -254,7 +264,11 @@ module Dependabot
           fetch("value")
       end
 
-      def dependency_from(details_hash:, buildfile:, in_dependency_set: false)
+      def dependency_from(
+        details_hash:,
+        buildfile:,
+        in_dependency_set: false,
+        resolved_from_property: nil)
         group   = evaluated_value(details_hash[:group], buildfile)
         name    = evaluated_value(details_hash[:name], buildfile)
         version = evaluated_value(details_hash[:version], buildfile)
@@ -283,10 +297,10 @@ module Dependabot
           version: version,
           requirements: [{
             requirement: version,
-            file: buildfile.name,
+            file: resolved_from_property != nil ? PROPERTIES_FILE : buildfile.name,
             source: source,
             groups: groups,
-            metadata: dependency_metadata(details_hash, in_dependency_set)
+            metadata: dependency_metadata(details_hash, in_dependency_set, resolved_from_property)
           }],
           package_manager: "gradle"
         )
@@ -305,15 +319,18 @@ module Dependabot
         }
       end
 
-      def dependency_metadata(details_hash, in_dependency_set)
+      def dependency_metadata(details_hash, in_dependency_set, resolved_from_property)
         version_property_name =
           details_hash[:version].
           match(PROPERTY_REGEX)&.
           named_captures&.fetch("property_name")
 
-        return unless version_property_name || in_dependency_set
+        return unless version_property_name || in_dependency_set || resolved_from_property != nil
 
         metadata = {}
+
+        metadata[:resolved_from_property] = resolved_from_property if resolved_from_property != nil
+
         metadata[:property_name] = version_property_name if version_property_name
         if in_dependency_set
           metadata[:dependency_set] = {
@@ -394,6 +411,12 @@ module Dependabot
           uniq
       end
 
+      def propertyfile
+        @propertyfile ||= dependency_files.find do |f|
+          f.name.end_with?(PROPERTIES_FILE)
+        end
+      end
+
       def check_required_files
         raise "No build.gradle or build.gradle.kts!" if dependency_files.empty?
       end
@@ -410,6 +433,41 @@ module Dependabot
 
       def unquote(string)
         string[1..-2]
+      end
+
+      def maybeResolveVersion(version, version_resolver)
+        if version.include? "project["
+          match = version.match(/project\[['"](.*?)['"]\]/)
+
+          if match
+            versionKey = match[1]
+
+            if version_resolver.key?(versionKey)
+              return [version_resolver[versionKey], versionKey]
+            else
+              puts "Found variable but couldn't resolve"
+              puts versionKey
+            end
+          else
+            puts "Found variable but can't extract"
+            puts declaration
+          end
+        end
+
+        [version, nil]
+      end
+
+      def build_version_resolver(property_file)
+        map = {}
+
+        prepared_content(property_file).scan(PROPERTY_LINE) do
+          key = Regexp.last_match.named_captures.fetch("key").strip
+          value = Regexp.last_match.named_captures.fetch("value").strip
+
+          map[key] = value
+        end
+
+        map
       end
     end
   end
